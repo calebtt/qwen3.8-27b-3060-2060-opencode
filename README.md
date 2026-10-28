@@ -23,6 +23,7 @@ koboldcpp-linux-x64 \
   --model Huihui-Qwen3.8-27B-abliterated-UD-Q3_K_XL.gguf \
   --contextsize 49152 \
   --quantkv q8_0 \
+  --flashattention \
   --threads 8 \
   --port 5001 \
   --skiplauncher \
@@ -36,8 +37,8 @@ koboldcpp-linux-x64 \
 
 What matters and why:
 
-- **`--usecuda 0 1 --maingpu 0 --tensor_split 46 20 --gpulayers 66`** puts all 66 offload slots on the GPUs, about 46 on the 3060 and 20 on the 2060. Leave roughly 2.4GB free on the 3060 and 1.7GB on the 2060 for the compute and scratch buffers. If you hit an out-of-memory error at load, move a couple of layers off the 2060 first. Make sure the 3060 is CUDA device 0 (`CUDA_DEVICE_ORDER=PCI_BUS_ID` helps).
-- **`--contextsize 49152` with `--quantkv q8_0`** gives 48k of context. The q8 KV cache is what makes that fit.
+- **`--usecuda 0 1 --maingpu 0 --tensor_split 46 20 --gpulayers 66`** puts all 66 offload slots on the GPUs, about 46 on the 3060 and 20 on the 2060. With flash attention and the q8 KV cache on, this leaves about 2.1GB free on the 3060 but only ~160MB free on the 2060 — the 2060 is the tight one. If you hit an out-of-memory error at load, move one layer off the 2060 (`--tensor_split 46 19`) first. Make sure the 3060 is CUDA device 0 (`CUDA_DEVICE_ORDER=PCI_BUS_ID` helps).
+- **`--contextsize 49152` with `--quantkv q8_0 --flashattention`** gives 48k of context. The q8 KV cache is what makes that fit, and `--flashattention` is required alongside it — without it the quantized KV cache desyncs and the model emits garbage (see below). Flash attention costs a little speed but keeps all 66 layers on the GPU and the cache stable.
 - **Keep thinking on (`--jinjathink true`).** With thinking off, the model got stuck repeating the same tool calls in opencode, even after being told it was looping.
 - **Set the effort through `--gendefaults`.** `--reasoningeffort` does nothing when launched from the command line (only the GUI reads it). `gendefaults` only fill in values the client leaves out, and opencode sends no sampler settings, so these become the real sampler settings. The samplers are Qwen's recommended thinking-mode values.
 - **Fixed chat template (`--jinjatemplate`).** I use froggeric's [Qwen-Fixed-Chat-Templates](https://huggingface.co/froggeric/Qwen-Fixed-Chat-Templates), v22.5. It fixes tool-call rendering, empty-thinking and agent-stall bugs in the template embedded in the GGUF. Download it with:
@@ -94,13 +95,26 @@ Compaction summary reached the output token limit
 
 At 16384, the summary has room to finish, and opencode starts compacting earlier because it sets that space aside.
 
+## Garbage output / KV-cache corruption
+
+Symptom: mid-session the model suddenly emits garbage — long runs of a repeated character like `ëëëëëëëë`, the literal words `garbage region`, or text bleeding in from an unrelated earlier turn. A *fresh* session with a simple prompt looks fine, which is the tell-tale sign it's the KV cache and not the model weights or the GPU.
+
+Root cause: `--quantkv q8_0` **without** `--flashattention`. The quantized KV cache desyncs, and KoboldCpp's SmartCache then keeps restoring the corrupted KV slot every turn (you'll see `SmartCache RNN Match` / `Restored KV` lines in the log), so the corruption persists across turns instead of clearing.
+
+Fix: run `--quantkv q8_0` **and** `--flashattention` together, as in the launch command above. That makes the quantized cache reliable and keeps all 66 layers on the GPU. The alternatives, if you prefer:
+
+- Drop `--quantkv` entirely (full-precision KV). Stable, but the bigger cache spills ~5 layers to the CPU and roughly halves short-context speed.
+- Add `--noshift` to also disable context shifting / SmartCache, if you want to rule the cache out completely.
+
+To recover a session that's already gone bad, reload the model (which clears the KV cache) and in the opencode TUI `/undo` back past the garbage reply, or start a new session.
+
 ## Performance
 
-These are KoboldCpp's own numbers from its log (`CtxLimit ... Generated: N in Xs (T/s)` lines):
+These are KoboldCpp's own numbers from its log (`CtxLimit ... Generated: N in Xs (T/s)` lines), with `--flashattention` on. Short-context generation was about 23 tok/s before flash attention; FA trades a few tok/s for a stable quantized KV cache.
 
 | Context in use | Generation | Prompt processing |
 |---|---|---|
-| Short | about 23 tok/s | |
+| Short | about 16.4 tok/s | |
 | 20–46k | about 10.8–12.6 tok/s | about 340–510 tok/s |
 
 Generation slowing down as context grows is expected.
@@ -112,3 +126,4 @@ Generation slowing down as context grows is expected.
 - **Slow prompt processing:** check the PCIe link while the model is busy with `nvidia-smi --query-gpu=index,pcie.link.gen.current,pcie.link.width.current --format=csv`. My 3060 once got stuck at Gen1 after boot, and a reboot fixed it. The cards drop to Gen1 when idle to save power, so only trust a reading taken under load.
 - **Games on the same GPU:** a game running on the 3060 competes for its VRAM and compute. Unload the model or expect stutter.
 - **Out of memory at load:** lower `--tensor_split`'s second number by one or two, or lower `--contextsize`.
+- **Model calls a tool named `web` (or other truncated tool names):** at deep context (30k+ tokens) this Q3 build sometimes shortens a tool name, e.g. `webfetch` to `web`, and opencode can't match it. Trim the session with `/undo` or start fresh so it runs at shorter context, or remind it in the prompt to use the full tool name (`webfetch` / `websearch`).
