@@ -40,7 +40,14 @@ What matters and why:
 - **`--contextsize 49152` with `--quantkv q8_0`** gives 48k of context. The q8 KV cache is what makes that fit.
 - **Keep thinking on (`--jinjathink true`).** With thinking off, the model got stuck repeating the same tool calls in opencode, even after being told it was looping.
 - **Set the effort through `--gendefaults`.** `--reasoningeffort` does nothing when launched from the command line (only the GUI reads it). `gendefaults` only fill in values the client leaves out, and opencode sends no sampler settings, so these become the real sampler settings. The samplers are Qwen's recommended thinking-mode values.
-- **Fixed chat template (`--jinjatemplate`).** I use froggeric's Qwen3.8 chat template, v22.5, which fixes tool-call formatting and thinking handling compared to the template embedded in the GGUF. Get it from its original source; it isn't redistributed here.
+- **Fixed chat template (`--jinjatemplate`).** I use froggeric's [Qwen-Fixed-Chat-Templates](https://huggingface.co/froggeric/Qwen-Fixed-Chat-Templates), v22.5. It fixes tool-call rendering, empty-thinking and agent-stall bugs in the template embedded in the GGUF. Download it with:
+
+  ```bash
+  curl -L -o qwen-fixed-chat_template-v22.5.jinja \
+    https://huggingface.co/froggeric/Qwen-Fixed-Chat-Templates/raw/main/chat_template.jinja
+  ```
+
+  That URL always serves the latest version. The first line of the file shows which one you got (`template_version = "qwen3.8-froggeric-v22.5"`).
 
 ## opencode config
 
